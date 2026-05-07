@@ -25,22 +25,69 @@ import (
 // NewNamespacedCloudProfileMutator returns a new instance of a NamespacedCloudProfile mutator.
 func NewNamespacedCloudProfileMutator(mgr manager.Manager) extensionswebhook.Mutator {
 	return &namespacedCloudProfile{
+		client:  mgr.GetClient(),
 		decoder: serializer.NewCodecFactory(mgr.GetScheme(), serializer.EnableStrict).UniversalDecoder(),
 	}
 }
 
 type namespacedCloudProfile struct {
+	client  client.Client
 	decoder runtime.Decoder
 }
 
 // Mutate mutates the given NamespacedCloudProfile object.
-func (p *namespacedCloudProfile) Mutate(_ context.Context, newObj, _ client.Object) error {
+func (p *namespacedCloudProfile) Mutate(ctx context.Context, newObj, _ client.Object) error {
 	profile, ok := newObj.(*gardencorev1beta1.NamespacedCloudProfile)
 	if !ok {
 		return fmt.Errorf("wrong object type %T", newObj)
 	}
 
-	if shouldSkipMutation(profile) {
+	if profile.DeletionTimestamp != nil {
+		return nil
+	}
+
+	// Mutation 1: Populate capabilityFlavors on spec.machineImages
+	if err := p.mutateSpecCapabilityFlavors(ctx, profile); err != nil {
+		return err
+	}
+
+	// Mutation 2: Merge spec providerConfig into status (only on status subresource updates)
+	if err := p.mergeStatusProviderConfig(profile); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// mutateSpecCapabilityFlavors populates capabilityFlavors on spec.machineImages based on the
+// provider config. This ensures Gardener core validation sees capabilityFlavors before it runs.
+func (p *namespacedCloudProfile) mutateSpecCapabilityFlavors(ctx context.Context, profile *gardencorev1beta1.NamespacedCloudProfile) error {
+	if profile.Spec.Parent.Name == "" || len(profile.Spec.MachineImages) == 0 || profile.Spec.ProviderConfig == nil {
+		return nil
+	}
+
+	parentProfile := &gardencorev1beta1.CloudProfile{}
+	if err := p.client.Get(ctx, client.ObjectKey{Name: profile.Spec.Parent.Name}, parentProfile); err != nil {
+		return fmt.Errorf("could not get parent CloudProfile %q: %w", profile.Spec.Parent.Name, err)
+	}
+
+	if len(parentProfile.Spec.MachineCapabilities) == 0 {
+		return nil
+	}
+
+	specConfig := &v1alpha1.CloudProfileConfig{}
+	if _, _, err := p.decoder.Decode(profile.Spec.ProviderConfig.Raw, nil, specConfig); err != nil {
+		return fmt.Errorf("could not decode providerConfig of namespacedCloudProfile spec for '%s': %w", profile.Name, err)
+	}
+
+	mutateMachineImageCapabilityFlavors(profile.Spec.MachineImages, specConfig)
+	return nil
+}
+
+// mergeStatusProviderConfig merges the spec providerConfig into the status providerConfig.
+// This only runs on status subresource updates (when generation == observedGeneration).
+func (p *namespacedCloudProfile) mergeStatusProviderConfig(profile *gardencorev1beta1.NamespacedCloudProfile) error {
+	if !shouldMergeStatus(profile) {
 		return nil
 	}
 
@@ -66,11 +113,12 @@ func (p *namespacedCloudProfile) Mutate(_ context.Context, newObj, _ client.Obje
 	return nil
 }
 
-func shouldSkipMutation(profile *gardencorev1beta1.NamespacedCloudProfile) bool {
-	return profile.DeletionTimestamp != nil ||
-		profile.Generation != profile.Status.ObservedGeneration ||
-		profile.Spec.ProviderConfig == nil ||
-		profile.Status.CloudProfileSpec.ProviderConfig == nil
+// shouldMergeStatus returns true when the status has been populated by the reconciler
+// (generation matches observedGeneration) and both configs are available.
+func shouldMergeStatus(profile *gardencorev1beta1.NamespacedCloudProfile) bool {
+	return profile.Generation == profile.Status.ObservedGeneration &&
+		profile.Spec.ProviderConfig != nil &&
+		profile.Status.CloudProfileSpec.ProviderConfig != nil
 }
 
 func mergeMachineImages(specMachineImages, statusMachineImages []v1alpha1.MachineImages) []v1alpha1.MachineImages {
