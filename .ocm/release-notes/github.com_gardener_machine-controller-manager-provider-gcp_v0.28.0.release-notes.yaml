@@ -1,0 +1,14 @@
+ocm:
+  component_name: github.com/gardener/machine-controller-manager-provider-gcp
+  component_version: v0.28.0
+release_notes:
+- audience: operator
+  author:
+    hostname: github.com
+    type: githubUser
+    username: takoverflow
+  category: other
+  contents: Golang version used is now upgraded to `1.26.2`
+  mimetype: text/markdown
+  reference: '[#193](https://github.com/gardener/machine-controller-manager-provider-gcp/pull/193)'
+  type: standard
